@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Footstep Power Generation - Live</title>
+<style>
+  :root { --bg:#f5f7fa; --card:#fff; --text:#1b2430; --muted:#6b7785; --accent:#0b7a75; --line:#d9e0e7; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#10161d; --card:#18212b; --text:#e8eef4; --muted:#93a1b0; --accent:#35c2b9; --line:#2a3744; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Arial,sans-serif; background:var(--bg); color:var(--text); padding:20px; }
+  h1 { font-size:1.3rem; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:.9rem; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; max-width:720px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .label { color:var(--muted); font-size:.85rem; }
+  .value { font-size:2.4rem; font-weight:700; color:var(--accent); }
+  .unit { font-size:1rem; color:var(--muted); font-weight:400; }
+  .wide { grid-column:1 / -1; }
+  canvas { width:100%; height:180px; display:block; }
+  .ok { color:#1a9a4a; } .bad { color:#d33; }
+  .cfg { max-width:720px; margin-top:14px; font-size:.85rem; color:var(--muted); }
+  .cfg input { padding:6px 8px; margin:4px 6px 4px 0; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--text); }
+  .cfg button { padding:6px 12px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
+</style>
+</head>
+<body>
+  <h1>Footstep Power Generation</h1>
+  <div class="sub">Live from Arduino UNO R4 WiFi via ThingSpeak &middot; <span id="status" class="bad">connecting...</span></div>
+  <div class="grid">
+    <div class="card"><div class="label">Steps</div><div class="value" id="steps">--</div></div>
+    <div class="card"><div class="label">Voltage</div><div class="value"><span id="volt">--</span> <span class="unit">V</span></div></div>
+    <div class="card wide"><div class="label">Voltage (recent readings)</div><canvas id="chart" width="680" height="180"></canvas></div>
+  </div>
+  <div class="sub" style="margin-top:12px">Last update: <span id="time">--</span></div>
+
+  <div class="cfg" style="display:none">
+    Channel ID <input id="cid" size="10" placeholder="e.g. 1234567">
+    Read API Key (only if channel is private) <input id="rkey" size="18" placeholder="optional">
+    <button onclick="save()">Save</button>
+  </div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let CHANNEL_ID = '3595387';
+  let READ_KEY   = '0N45LZPJI0ACAU4U';
+  $('cid').value = CHANNEL_ID; $('rkey').value = READ_KEY;
+
+  function save() {
+        CHANNEL_ID = $('cid').value.trim(); READ_KEY = $('rkey').value.trim();
+    poll();
+  }
+
+  function draw(pts) {
+    const c = $('chart'), g = c.getContext('2d');
+    const css = getComputedStyle(document.documentElement);
+    g.clearRect(0, 0, c.width, c.height);
+    if (pts.length < 2) return;
+    const max = Math.max(1, ...pts) * 1.1;
+    g.strokeStyle = css.getPropertyValue('--line'); g.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) { const y = 10 + i * (c.height - 20) / 4; g.beginPath(); g.moveTo(0, y); g.lineTo(c.width, y); g.stroke(); }
+    g.strokeStyle = css.getPropertyValue('--accent'); g.lineWidth = 2.5; g.beginPath();
+    pts.forEach((v, i) => {
+      const x = i * c.width / (pts.length - 1), y = c.height - 10 - (v / max) * (c.height - 20);
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    });
+    g.stroke();
+    g.fillStyle = css.getPropertyValue('--muted'); g.font = '12px sans-serif';
+    g.fillText(max.toFixed(2) + ' V', 4, 14);
+  }
+
+  async function poll() {
+    if (!CHANNEL_ID) { $('status').textContent = 'enter Channel ID below'; $('status').className = 'bad'; return; }
+    try {
+      let url = 'https://api.thingspeak.com/channels/' + CHANNEL_ID + '/feeds.json?results=40';
+      if (READ_KEY) url += '&api_key=' + READ_KEY;
+      const r = await fetch(url, { cache: 'no-store' });
+      const d = await r.json();
+      const feeds = d.feeds || [];
+      if (!feeds.length) throw new Error('no data');
+      const last = feeds[feeds.length - 1];
+      $('steps').textContent = last.field1 ?? '--';
+      $('volt').textContent = parseFloat(last.field2 || 0).toFixed(2);
+      $('time').textContent = new Date(last.created_at).toLocaleString();
+      draw(feeds.map(f => parseFloat(f.field2 || 0)));
+      $('status').textContent = 'connected'; $('status').className = 'ok';
+    } catch (e) {
+      $('status').textContent = 'no data / check Channel ID'; $('status').className = 'bad';
+    }
+  }
+  poll(); setInterval(poll, 5000);
+</script>
+</body>
+</html>
