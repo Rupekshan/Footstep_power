@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!DOCTYPE html> 
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -20,7 +20,18 @@
   .unit { font-size:1rem; color:var(--muted); font-weight:400; }
   .wide { grid-column:1 / -1; }
   canvas { width:100%; height:180px; display:block; }
-  .ok { color:#1a9a4a; } .bad { color:#d33; }
+  .ok { color:#1a9a4a; } .bad { color:#d33; } .warn { color:#c77a00; }
+
+  /* Arduino online/offline badge */
+  .badge { display:inline-flex; align-items:center; gap:8px; max-width:720px; width:100%;
+           padding:10px 14px; margin-bottom:14px; border-radius:10px;
+           background:var(--card); border:1px solid var(--line); font-size:.95rem; font-weight:600; }
+  .dot { width:11px; height:11px; border-radius:50%; background:currentColor; flex:none; }
+  .badge.ok .dot { animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+  @media (prefers-reduced-motion: reduce) { .badge.ok .dot { animation:none; } }
+  .badge small { color:var(--muted); font-weight:400; }
+
   .cfg { max-width:720px; margin-top:14px; font-size:.85rem; color:var(--muted); }
   .cfg input { padding:6px 8px; margin:4px 6px 4px 0; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--text); }
   .cfg button { padding:6px 12px; border:0; border-radius:6px; background:var(--accent); color:#fff; cursor:pointer; }
@@ -28,7 +39,13 @@
 </head>
 <body>
   <h1>Footstep Power Generation</h1>
-  <div class="sub">Live from Arduino UNO R4 WiFi via ThingSpeak &middot; <span id="status" class="bad">connecting...</span></div>
+  <div class="sub">Live from Arduino UNO R4 WiFi</div>
+
+  <div id="status" class="badge bad" role="status" aria-live="polite">
+    <span class="dot"></span>
+    <span><span id="statusText">Checking Arduino...</span> <small id="statusSub"></small></span>
+  </div>
+
   <div class="grid">
     <div class="card"><div class="label">Steps</div><div class="value" id="steps">--</div></div>
     <div class="card"><div class="label">Voltage</div><div class="value"><span id="volt">--</span> <span class="unit">V</span></div></div>
@@ -48,9 +65,54 @@
   let READ_KEY   = '0N45LZPJI0ACAU4U';
   $('cid').value = CHANNEL_ID; $('rkey').value = READ_KEY;
 
+  // The Arduino uploads every 16 s. If no new reading arrives for this long,
+  // it is treated as offline (powered off or lost WiFi).
+  const OFFLINE_AFTER_MS = 50 * 1000;
+
+  let lastSeen = null;     // Date of the newest reading on ThingSpeak
+  let cloudOk  = true;     // could this page reach ThingSpeak?
+  let hasData  = true;     // does the channel have any readings?
+
   function save() {
-        CHANNEL_ID = $('cid').value.trim(); READ_KEY = $('rkey').value.trim();
+    CHANNEL_ID = $('cid').value.trim(); READ_KEY = $('rkey').value.trim();
+    lastSeen = null;
     poll();
+  }
+
+  function ago(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ' + (s % 60) + 's';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ' + (m % 60) + 'm';
+    return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+  }
+
+  function setBadge(cls, text, sub) {
+    $('status').className = 'badge ' + cls;
+    $('statusText').textContent = text;
+    $('statusSub').textContent = sub || '';
+  }
+
+  // Runs every second so "last seen" keeps counting between polls.
+  function renderStatus() {
+    if (!CHANNEL_ID) { setBadge('bad', 'Enter Channel ID below'); return; }
+
+    if (!lastSeen) {
+      if (!cloudOk)  setBadge('warn', 'Cannot load data', 'Check your internet connection');
+      else if (!hasData) setBadge('bad', 'Arduino not connected to WiFi', 'No data received yet');
+      else setBadge('warn', 'Checking Arduino...');
+      return;
+    }
+
+    const age = Date.now() - lastSeen.getTime();
+    if (age <= OFFLINE_AFTER_MS) {
+      setBadge('ok', 'Arduino connected to WiFi', 'last data ' + ago(age) + ' ago');
+    } else {
+      setBadge('bad', 'Arduino not connected to WiFi', 'last seen ' + ago(age) + ' ago');
+    }
+    if (!cloudOk) $('statusSub').textContent += ' · connection problem (status may be outdated)';
   }
 
   function draw(pts) {
@@ -72,25 +134,32 @@
   }
 
   async function poll() {
-    if (!CHANNEL_ID) { $('status').textContent = 'enter Channel ID below'; $('status').className = 'bad'; return; }
+    if (!CHANNEL_ID) { renderStatus(); return; }
     try {
       let url = 'https://api.thingspeak.com/channels/' + CHANNEL_ID + '/feeds.json?results=40';
       if (READ_KEY) url += '&api_key=' + READ_KEY;
       const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
       const d = await r.json();
+      cloudOk = true;
       const feeds = d.feeds || [];
-      if (!feeds.length) throw new Error('no data');
+      if (!feeds.length) { hasData = false; lastSeen = null; renderStatus(); return; }
+      hasData = true;
+
       const last = feeds[feeds.length - 1];
+      lastSeen = new Date(last.created_at);
       $('steps').textContent = last.field1 ?? '--';
       $('volt').textContent = parseFloat(last.field2 || 0).toFixed(2);
-      $('time').textContent = new Date(last.created_at).toLocaleString();
+      $('time').textContent = lastSeen.toLocaleString();
       draw(feeds.map(f => parseFloat(f.field2 || 0)));
-      $('status').textContent = 'connected'; $('status').className = 'ok';
     } catch (e) {
-      $('status').textContent = 'no data / check Channel ID'; $('status').className = 'bad';
+      cloudOk = false;   // keep the last known lastSeen so offline time keeps counting
     }
+    renderStatus();
   }
+
   poll(); setInterval(poll, 5000);
+  setInterval(renderStatus, 1000);
 </script>
 </body>
 </html>
